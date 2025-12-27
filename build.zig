@@ -30,6 +30,25 @@ pub fn build(b: *std.Build) void {
 
     const simple_step = b.step("simple", "Run the minimal demo");
     simple_step.dependOn(&simple_run.step);
+
+    // Example shared library (C)
+    const example_lib = b.addLibrary(.{
+        .name = "example",
+        .linkage = .dynamic,
+        .root_module = b.createModule(.{
+            .target = b.resolveTargetQuery(.{
+                .cpu_arch = .x86_64,
+                .os_tag = .linux,
+                .abi = .gnu,
+            }),
+            .optimize = optimize,
+            .link_libc = true,
+        }),
+    });
+    example_lib.addCSourceFile(.{ .file = b.path("src/example.c") });
+    b.installArtifact(example_lib);
+
+    simple_step.dependOn(&example_lib.step);
 }
 
 fn addDemo(

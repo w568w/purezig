@@ -3,29 +3,32 @@ const syscalls = @import("syscalls.zig");
 const utils = @import("utils.zig");
 const fdl = @import("fdl_resolve.zig");
 
-// Bootstrap main: load /bin/sleep to initialize dynamic linker
 fn appMain(_: c_int, _: [*][*:0]u8) c_int {
     var argv = [_][*:0]const u8{ "/bin/sleep", "0" };
     LoaderImpl.execElf("/bin/sleep", 2, @ptrCast(&argv));
     return 1;
 }
 
-// Core main: called after dynamic linker is ready
 fn fdlMain(ctx: *fdl.Context) void {
-    // Get handle to current process (libc already loaded)
-    const handle = ctx.dlopen(null, fdl.RTLD_NOW) orelse return;
+    const libc = ctx.dlopen(null, fdl.RTLD_NOW).?;
+    const example = ctx.dlopen("./zig-out/lib/libexample.so", fdl.RTLD_NOW).?;
 
-    // Resolve and call puts()
-    const puts = ctx.dlsym(handle, "puts", *const fn ([*:0]const u8) callconv(.c) c_int) orelse return;
-    _ = puts("Hello from foreign dlopen!");
+    // Call functions from our custom .so
+    const add = ctx.dlsym(example, "add", *const fn (c_int, c_int) callconv(.c) c_int).?;
+    const greet = ctx.dlsym(example, "greet", *const fn ([*:0]const u8) callconv(.c) void).?;
+    const factorial = ctx.dlsym(example, "factorial", *const fn (c_int) callconv(.c) c_int).?;
 
-    // Resolve and call printf()
-    const printf = ctx.dlsym(handle, "printf", *const fn ([*:0]const u8, ...) callconv(.c) c_int) orelse return;
-    _ = printf("The answer is: %d\n", @as(c_int, 42));
+    // Call libc functions
+    const printf = ctx.dlsym(libc, "printf", *const fn ([*:0]const u8, ...) callconv(.c) c_int).?;
+    const fflush = ctx.dlsym(libc, "fflush", *const fn (?*anyopaque) callconv(.c) c_int).?;
+
+    // Demo
+    _ = printf("add(3, 4) = %d\n", add(3, 4));
+    _ = printf("factorial(5) = %d\n", factorial(5));
+    greet("World");
+    _ = fflush(null);
 }
 
-// Define loader implementation and initialize static variables.
-// Note: MUST be called once and only once in the entire program!
 const LoaderImpl = loader.Loader(appMain, fdlMain);
 
 pub fn panic(_: []const u8, _: ?*@import("std").builtin.StackTrace, _: ?usize) noreturn {

@@ -25,8 +25,9 @@ Read [`src/simple_main.zig`](src/simple_main.zig) for the example code.
 
 ```bash
 $ zig build simple
-[libc puts] hello via foreign dlopen
-[libc printf] Number: 42, String: test
+add(3, 4) = 7
+factorial(5) = 120
+Hello, World! (from example.so)
 ```
 
 ## Requirements
