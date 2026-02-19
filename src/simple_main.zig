@@ -1,6 +1,4 @@
 const loader = @import("loader.zig");
-const syscalls = @import("syscalls.zig");
-const utils = @import("utils.zig");
 const fdl = @import("fdl_resolve.zig");
 
 fn appMain(_: c_int, _: [*][*:0]u8) c_int {
@@ -30,12 +28,5 @@ fn fdlMain(ctx: *fdl.Context) void {
 }
 
 const LoaderImpl = loader.Loader(appMain, fdlMain);
-
-pub fn panic(_: []const u8, _: ?*@import("std").builtin.StackTrace, _: ?usize) noreturn {
-    syscalls.exit(1);
-}
-
-comptime {
-    _ = LoaderImpl.z_start;
-    _ = utils.memset;
-}
+pub const _start = LoaderImpl._start;
+pub const panic = LoaderImpl.panic;

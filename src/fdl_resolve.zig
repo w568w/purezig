@@ -4,9 +4,10 @@
 const std = @import("std");
 const elf = std.elf;
 const mem = std.mem;
-const syscalls = @import("syscalls.zig");
+const posix = std.posix;
 const utils = @import("utils.zig");
-const printf = @import("printf.zig");
+
+const print = std.debug.print;
 
 const MAPS_PATH = "/proc/self/maps";
 const MAPS_BUF_SIZE = 64 * 1024;
@@ -59,9 +60,7 @@ const Module = struct {
     dynstr: ?[*:0]const u8 = null,
 };
 
-fn u32Mod(a: u32, m: u32) u32 {
-    return @intCast(utils.divmod(a, m).rem);
-}
+
 
 // Helper: convert DT_* pointer/offset to absolute VA
 fn dynPtr(base: usize, lo: usize, hi: usize, p: usize) usize {
@@ -112,12 +111,11 @@ fn parseMapsLine(line: []const u8) ?MapsEntry {
 fn findLibcBase() ?usize {
     if (cached_libc_base) |base| return base;
 
-    const fd = syscalls.open(MAPS_PATH, syscalls.O_RDONLY);
-    if (fd < 0) return null;
+    const fd = posix.openZ(MAPS_PATH, .{}, 0) catch return null;
+    defer posix.close(fd);
 
     var buf: [MAPS_BUF_SIZE]u8 = undefined;
-    const n = utils.readAll(fd, &buf, buf.len - 1);
-    _ = syscalls.close(fd);
+    const n = posix.read(fd, &buf) catch return null;
     if (n == 0) return null;
 
     var lines = mem.splitScalar(u8, buf[0..n], '\n');
@@ -128,10 +126,7 @@ fn findLibcBase() ?usize {
             if (entry.path != null and entry.offset == 0) {
                 cached_libc_base = entry.start;
 
-                printf.fdprintf(2, "libc base 0x%lx @ %s\n", &[_]printf.FormatArg{
-                    printf.FormatArg.fromUint(entry.start),
-                    printf.FormatArg.fromSlice(entry.path.?),
-                });
+                print("libc base 0x{x} @ {s}\n", .{ entry.start, entry.path.? });
 
                 return entry.start;
             }
@@ -163,11 +158,8 @@ fn modInit(m: *Module, base: usize) ModInitError!void {
     m.ph = @ptrFromInt(base + eh.e_phoff);
     const ph = m.ph.?;
 
-    printf.fdprintf(2, "mod_init: base=0x%lx phoff=0x%lx phnum=%u entsz=%u\n", &[_]printf.FormatArg{
-        printf.FormatArg.fromUint(base),
-        printf.FormatArg.fromUint(eh.e_phoff),
-        printf.FormatArg.fromUint(eh.e_phnum),
-        printf.FormatArg.fromUint(eh.e_phentsize),
+    print("mod_init: base=0x{x} phoff=0x{x} phnum={d} entsz={d}\n", .{
+        base, eh.e_phoff, eh.e_phnum, eh.e_phentsize,
     });
 
     // Find load range and PT_DYNAMIC in single pass
@@ -192,23 +184,17 @@ fn modInit(m: *Module, base: usize) ModInitError!void {
 
     // Validate PT_DYNAMIC
     const da = dyn_addr orelse {
-        printf.fdprintf(2, "mod_init: no PT_DYNAMIC\n", &[_]printf.FormatArg{});
+        print("mod_init: no PT_DYNAMIC\n", .{});
         return error.NoDynamic;
     };
 
     if (da < lo or da + @sizeOf(elf.Elf64_Dyn) > hi) {
-        printf.fdprintf(2, "mod_init: PT_DYNAMIC out of range: 0x%lx [0x%lx..0x%lx)\n", &[_]printf.FormatArg{
-            printf.FormatArg.fromUint(da),
-            printf.FormatArg.fromUint(lo),
-            printf.FormatArg.fromUint(hi),
-        });
+        print("mod_init: PT_DYNAMIC out of range: 0x{x} [0x{x}..0x{x})\n", .{ da, lo, hi });
         return error.DynamicOutOfRange;
     }
 
     m.dyn = @ptrFromInt(da);
-    printf.fdprintf(2, "mod_init: PT_DYNAMIC @ 0x%lx\n", &[_]printf.FormatArg{
-        printf.FormatArg.fromUint(da),
-    });
+    print("mod_init: PT_DYNAMIC @ 0x{x}\n", .{da});
 
     // Parse dynamic section
     const dyn = m.dyn.?;
@@ -243,11 +229,13 @@ fn modInit(m: *Module, base: usize) ModInitError!void {
         }
     }
 
-    printf.fdprintf(2, "mod_init: dynsym=%p dynstr=%p gnu_hash=%p sysv_hash=%p\n", &[_]printf.FormatArg{
-        printf.FormatArg.fromPtr(m.dynsym),
-        printf.FormatArg.fromPtr(m.dynstr),
-        printf.FormatArg.fromPtr(m.gnu_buckets),
-        printf.FormatArg.fromPtr(m.buckets),
+    const optPtr = struct {
+        fn f(p: anytype) usize {
+            return if (p) |v| @intFromPtr(v) else 0;
+        }
+    }.f;
+    print("mod_init: dynsym=0x{x} dynstr=0x{x} gnu_hash=0x{x} sysv_hash=0x{x}\n", .{
+        optPtr(m.dynsym), optPtr(m.dynstr), optPtr(m.gnu_buckets), optPtr(m.buckets),
     });
 
     if (m.dynsym == null or m.dynstr == null) {
@@ -289,7 +277,7 @@ fn lookupGnu(m: *const Module, name: [*:0]const u8) ?*const elf.Elf64_Sym {
         return null;
     }
 
-    var idx = m.gnu_buckets.?[u32Mod(h, m.gnu_nbucket)];
+    var idx = m.gnu_buckets.?[h % m.gnu_nbucket];
     if (idx == 0) return null;
 
     while (true) {
@@ -315,7 +303,7 @@ fn lookupSysv(m: *const Module, name: [*:0]const u8) ?*const elf.Elf64_Sym {
     if (m.buckets == null) return null;
 
     const h = sysvHash(name);
-    var i = m.buckets.?[u32Mod(h, m.nbucket)];
+    var i = m.buckets.?[h % m.nbucket];
 
     while (i != 0) {
         const sym = &m.dynsym.?[i];
@@ -350,7 +338,7 @@ pub const ResolveError = error{
 pub fn init(interp_base: usize) ResolveError!Context {
     const base = findLibcBase() orelse blk: {
         if (interp_base != 0) {
-            printf.puts("Falling back to the interpreter, for muslc the loader/libc are the same");
+            print("Falling back to the interpreter, for muslc the loader/libc are the same\n", .{});
             break :blk interp_base;
         }
         return error.NoLibcBase;
