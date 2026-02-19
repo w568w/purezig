@@ -2,17 +2,18 @@
 // Loads an ELF executable and hijacks its entry point to demonstrate
 // dynamic symbol resolution from a statically-linked binary
 
+const std = @import("std");
 const loader = @import("loader.zig");
 const syscalls = @import("syscalls.zig");
-const printf = @import("printf.zig");
 const fdl = @import("fdl_resolve.zig");
+
+const print = std.debug.print;
 
 const DL_APP_DEFAULT: [*:0]const u8 = "/bin/sleep";
 
 // Main function called from z_entry
 fn appMain(argc: c_int, argv: [*][*:0]u8) c_int {
-    const msg = "appMain called\n";
-    _ = syscalls.write(2, msg.ptr, msg.len);
+    print("appMain called\n", .{});
 
     const app: [*:0]const u8 = if (argc > 1 and argv[1][0] != 0)
         argv[1]
@@ -26,13 +27,10 @@ fn appMain(argc: c_int, argv: [*][*:0]u8) c_int {
 
 // Called after dynamic linker initializes and symbols are resolved
 fn fdlMain(ctx: *fdl.Context) void {
-    printf.printf("dlopen=%p dlsym=%p\n", &[_]printf.FormatArg{
-        printf.FormatArg.fromPtr(ctx.dlopen_ptr),
-        printf.FormatArg.fromPtr(ctx.dlsym_ptr),
-    });
+    print("dlopen=0x{x} dlsym=0x{x}\n", .{ @intFromPtr(ctx.dlopen_ptr), @intFromPtr(ctx.dlsym_ptr) });
 
     const handle = ctx.dlopen(null, fdl.RTLD_NOW) orelse return;
-    printf.printf("handle: %p\n", &[_]printf.FormatArg{printf.FormatArg.fromPtr(handle)});
+    print("handle: 0x{x}\n", .{@intFromPtr(handle)});
 
     if (ctx.dlsym(handle, "puts", *const fn ([*:0]const u8) callconv(.c) c_int)) |puts| {
         _ = puts("[libc puts] hello via foreign dlopen");
@@ -45,20 +43,15 @@ fn fdlMain(ctx: *fdl.Context) void {
     if (ctx.dlsym(handle, "strlen", *const fn ([*:0]const u8) callconv(.c) usize)) |strlen| {
         const test_str = "Hello, World!";
         const len = strlen(test_str);
-        printf.printf("[libc strlen] Length of '%s' is %u\n", &[_]printf.FormatArg{
-            printf.FormatArg.fromStr(test_str),
-            printf.FormatArg.fromUint(len),
-        });
+        print("[libc strlen] Length of '{s}' is {d}\n", .{ test_str, len });
     }
 
     if (ctx.dlsym(handle, "getpid", *const fn () callconv(.c) c_int)) |getpid| {
         const pid = getpid();
-        printf.printf("[libc getpid] Process ID: %d\n", &[_]printf.FormatArg{
-            printf.FormatArg.fromInt(pid),
-        });
+        print("[libc getpid] Process ID: {d}\n", .{pid});
     }
 
-    printf.puts("Done");
+    print("Done\n", .{});
 }
 
 const LoaderImpl = loader.Loader(appMain, fdlMain);

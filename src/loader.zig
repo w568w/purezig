@@ -5,8 +5,9 @@ const std = @import("std");
 const elf = std.elf;
 const syscalls = @import("syscalls.zig");
 const utils = @import("utils.zig");
-const printf = @import("printf.zig");
 const fdl_resolve = @import("fdl_resolve.zig");
+
+const print = std.debug.print;
 
 const Z_PROG: usize = 0;
 const Z_INTERP: usize = 1;
@@ -94,13 +95,11 @@ fn loadelfAnon(fd: c_int, ehdr: *const elf.Elf64_Ehdr, phdr: [*]const elf.Elf64_
 }
 
 fn errx(msg: [*:0]const u8, file: ?[*:0]const u8) noreturn {
-    printf.fputs("error: ", 2);
-    printf.fputs(msg, 2);
     if (file) |f| {
-        printf.fputs(": ", 2);
-        printf.fputs(f, 2);
+        print("error: {s}: {s}\n", .{ msg, f });
+    } else {
+        print("error: {s}\n", .{msg});
     }
-    printf.fputs("\n", 2);
     syscalls.exit(1);
 }
 
@@ -125,17 +124,46 @@ pub fn Loader(
         var entry_sp: ?[*]usize = null;
         var interp_base: usize = 0;
 
-        // Entry point called from z_start
+        // Entry point called from z_start.
+        // Must replicate std.start initialization: PIE relocations, then TLS setup.
         pub export fn z_entry(sp: [*]usize) callconv(.c) void {
-            entry_sp = sp;
+            @setRuntimeSafety(false);
+            @disableInstrumentation();
+
             const argc: usize = sp[0];
             const argv: [*][*:0]u8 = @ptrCast(sp + 1);
+            var env_p: [*]usize = @ptrCast(sp + 1 + argc + 1);
+            while (env_p[0] != 0) : (env_p += 1) {}
+            env_p += 1;
+            const auxv: [*]elf.Elf64_auxv_t = @ptrCast(@alignCast(env_p));
+
+            var at_phdr: usize = 0;
+            var at_phnum: usize = 0;
+            {
+                var i: usize = 0;
+                while (auxv[i].a_type != elf.AT_NULL) : (i += 1) {
+                    switch (auxv[i].a_type) {
+                        elf.AT_PHDR => at_phdr = auxv[i].a_un.a_val,
+                        elf.AT_PHNUM => at_phnum = auxv[i].a_un.a_val,
+                        else => {},
+                    }
+                }
+            }
+            const phdrs = @as([*]elf.Elf64_Phdr, @ptrFromInt(at_phdr))[0..at_phnum];
+
+            // PIE relocations must happen before any global variable access
+            @call(.always_inline, std.pie.relocate, .{phdrs});
+
+            std.os.linux.elf_aux_maybe = auxv;
+            std.os.linux.tls.initStatic(phdrs);
+
+            entry_sp = sp;
             _ = app_main(@intCast(argc), argv);
         }
 
         // Called after dynamic loader initializes
         pub export fn fdl_entry_impl() callconv(.c) void {
-            printf.puts("Loader is in memory... Start parsing logic");
+            print("Loader is in memory... Start parsing logic\n", .{});
 
             var ctx = fdl_resolve.init(interp_base) catch {
                 syscalls.exit(1);
@@ -287,9 +315,7 @@ pub fn Loader(
                     @memmove(@as([*]u8, @ptrCast(&static_interp)), interp_buf[0..(interp_size + 1)]);
 
                     elf_interp = @ptrCast(&static_interp);
-                    printf.printf("elf_interp: %s\n", &[_]printf.FormatArg{
-                        printf.FormatArg.fromStr(elf_interp.?),
-                    });
+                    print("elf_interp: {s}\n", .{elf_interp.?});
                     current_file = elf_interp.?;
                 }
 
@@ -333,9 +359,9 @@ pub fn Loader(
                 interp_base = base[Z_INTERP];
             }
 
-            printf.printf("Calling trampo...file: %s, interp: %s\n", &[_]printf.FormatArg{
-                printf.FormatArg.fromStr(if (current_file[0] != 0) current_file else "(null)"),
-                printf.FormatArg.fromStr(if (elf_interp) |ei| ei else "(null)"),
+            print("Calling trampo...file: {s}, interp: {s}\n", .{
+                if (current_file[0] != 0) current_file else "(null)",
+                if (elf_interp) |ei| ei else @as([*:0]const u8, "(null)"),
             });
 
             // Jump to dynamic loader (or program entry if static)
