@@ -1,8 +1,7 @@
 const fdl = @import("foreign_dlopen");
 
 fn appMain(_: c_int, _: [*][*:0]u8) c_int {
-    var argv = [_][*:0]const u8{ "/bin/sleep", "0" };
-    Impl.execElf("/bin/sleep", 2, @ptrCast(&argv));
+    Impl.execElf("/bin/sleep", &.{ "/bin/sleep", "0" });
     return 1;
 }
 

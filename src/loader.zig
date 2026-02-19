@@ -160,8 +160,7 @@ const StackInfo = struct {
 /// envp and the auxiliary vector.
 fn buildStack(
     orig_sp: [*]usize,
-    argc: usize,
-    argv: [*][*:0]u8,
+    argv: []const [*:0]const u8,
     buf: *align(16) [4096]u8,
 ) StackInfo {
     // Walk past the original argv to find where envp+auxv begin
@@ -176,13 +175,15 @@ fn buildStack(
     p += 1; // skip auxv terminator
 
     const env_aux_len = p - env_start;
+    const argc = argv.len;
 
     // Build new stack: [argc] [argv...] [0] [envp...] [0] [auxv...] [0]
     const sp: [*]usize = @ptrCast(@alignCast(buf));
     sp[0] = argc;
 
     const new_argv: [*][*:0]u8 = @ptrCast(sp + 1);
-    @memmove(new_argv, argv[0..argc]);
+    const dest: [*][*:0]const u8 = @ptrCast(new_argv);
+    @memmove(dest, argv);
 
     const env_aux_dst: [*]usize = @ptrCast(new_argv + argc);
     @memmove(env_aux_dst, env_start[0..env_aux_len]);
@@ -314,12 +315,12 @@ pub fn Loader(
 
         /// Load an ELF executable (and its interpreter, if any),
         /// patch the auxiliary vector, and jump to the entry point.
-        pub fn execElf(file: [*:0]const u8, argc: c_int, argv: [*][*:0]u8) void {
+        pub fn execElf(file: [*:0]const u8, argv: []const [*:0]const u8) void {
             const orig_sp = entry_sp orelse return;
 
             // 1. Build a new process stack with our argv
             var stack_buf: [4096]u8 align(16) = undefined;
-            const stack = buildStack(orig_sp, @intCast(argc), argv, &stack_buf);
+            const stack = buildStack(orig_sp, argv, &stack_buf);
 
             // 2. Load the program
             var interp_path_buf: [PATH_MAX]u8 = undefined;

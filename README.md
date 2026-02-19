@@ -81,8 +81,7 @@ const fdl = @import("foreign_dlopen");
 fn appMain(_: c_int, _: [*][*:0]u8) c_int {
     // Pick any dynamically-linked ELF on the system as a "host" binary.
     // Its dynamic linker will be loaded, giving us access to dlopen/dlsym.
-    var argv = [_][*:0]const u8{ "/bin/sleep", "0" };
-    Impl.execElf("/bin/sleep", 2, @ptrCast(&argv));
+    Impl.execElf("/bin/sleep", &.{ "/bin/sleep", "0" });
     return 1;
 }
 

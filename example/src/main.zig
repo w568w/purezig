@@ -13,8 +13,7 @@ fn appMain(argc: c_int, argv: [*][*:0]u8) c_int {
     else
         DL_APP_DEFAULT;
 
-    var targv = [_][*:0]const u8{ app, "x" };
-    Impl.execElf(app, 2, @ptrCast(&targv));
+    Impl.execElf(app, &.{ app, "x" });
     return 1;
 }
 
