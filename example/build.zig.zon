@@ -1,0 +1,9 @@
+.{
+    .name = .foreign_dlopen_example,
+    .version = "0.0.0",
+    .fingerprint = 0x1167d2befe7e999f,
+    .dependencies = .{
+        .foreign_dlopen = .{ .path = ".." },
+    },
+    .paths = .{ "build.zig", "build.zig.zon", "src", "lib" },
+}
