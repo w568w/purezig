@@ -5,8 +5,6 @@ const std = @import("std");
 const elf = std.elf;
 const mem = std.mem;
 const posix = std.posix;
-const utils = @import("utils.zig");
-
 const print = std.debug.print;
 
 const MAPS_PATH = "/proc/self/maps";
@@ -221,9 +219,9 @@ fn modInit(m: *Module, base: usize) ModInitError!void {
                 m.gnu_symoffset = gh[1];
                 m.gnu_maskwords = gh[2];
                 m.gnu_shift2 = gh[3];
-                m.gnu_bloom = @ptrFromInt(@intFromPtr(gh + 4));
-                m.gnu_buckets = @ptrFromInt(@intFromPtr(m.gnu_bloom.?) + m.gnu_maskwords * @sizeOf(usize));
-                m.gnu_chain = @ptrFromInt(@intFromPtr(m.gnu_buckets.?) + m.gnu_nbucket * @sizeOf(u32));
+                m.gnu_bloom = @ptrCast(@alignCast(gh + 4));
+                m.gnu_buckets = @ptrCast(m.gnu_bloom.? + m.gnu_maskwords);
+                m.gnu_chain = @ptrCast(m.gnu_buckets.? + m.gnu_nbucket);
             },
             else => {},
         }
@@ -286,7 +284,7 @@ fn lookupGnu(m: *const Module, name: [*:0]const u8) ?*const elf.Elf64_Sym {
             const sym = &m.dynsym.?[idx];
             if (sym.st_name != 0) {
                 const sym_name: [*:0]const u8 = @ptrCast(m.dynstr.? + sym.st_name);
-                if (utils.strcmp(sym_name, name) == 0) {
+                if (mem.orderZ(u8, sym_name, name) == .eq) {
                     return sym;
                 }
             }
@@ -309,7 +307,7 @@ fn lookupSysv(m: *const Module, name: [*:0]const u8) ?*const elf.Elf64_Sym {
         const sym = &m.dynsym.?[i];
         if (sym.st_name != 0) {
             const sym_name: [*:0]const u8 = @ptrCast(m.dynstr.? + sym.st_name);
-            if (utils.strcmp(sym_name, name) == 0) {
+            if (mem.orderZ(u8, sym_name, name) == .eq) {
                 return sym;
             }
         }

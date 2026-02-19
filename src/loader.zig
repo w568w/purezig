@@ -3,6 +3,7 @@
 
 const std = @import("std");
 const elf = std.elf;
+const mem = std.mem;
 const linux = std.os.linux;
 const posix = std.posix;
 const utils = @import("utils.zig");
@@ -10,6 +11,7 @@ const fdl_resolve = @import("fdl_resolve.zig");
 
 const print = std.debug.print;
 
+const PAGE_SIZE = std.heap.page_size_min;
 const PATH_MAX = 4096;
 const MAX_PHNUM = 16;
 
@@ -36,11 +38,11 @@ fn loadSegments(fd: posix.fd_t, ehdr: *const elf.Elf64_Ehdr, phdr: [*]const elf.
         if (end > maxva) maxva = end;
     }
 
-    minva = utils.truncPg(minva);
-    maxva = utils.roundPg(maxva);
+    minva = mem.alignBackward(usize, minva, PAGE_SIZE);
+    maxva = mem.alignForward(usize, maxva, PAGE_SIZE);
 
     // Reserve the full address range
-    const hint: ?[*]align(utils.PAGE_SIZE) u8 = if (dyn) null else @ptrFromInt(minva);
+    const hint: ?[*]align(PAGE_SIZE) u8 = if (dyn) null else @ptrFromInt(minva);
     const reservation = try posix.mmap(
         hint,
         maxva - minva,
@@ -56,9 +58,9 @@ fn loadSegments(fd: posix.fd_t, ehdr: *const elf.Elf64_Ehdr, phdr: [*]const elf.
     for (phdr[0..ehdr.e_phnum]) |p| {
         if (p.p_type != elf.PT_LOAD) continue;
 
-        const off = p.p_vaddr & utils.PAGE_MASK;
-        const seg_start = (if (dyn) base else 0) + utils.truncPg(p.p_vaddr);
-        const sz = utils.roundPg(p.p_memsz + off);
+        const off = p.p_vaddr % PAGE_SIZE;
+        const seg_start = (if (dyn) base else 0) + mem.alignBackward(usize, p.p_vaddr, PAGE_SIZE);
+        const sz = mem.alignForward(usize, p.p_memsz + off, PAGE_SIZE);
 
         const mapped = try posix.mmap(
             @ptrFromInt(seg_start),
@@ -70,7 +72,7 @@ fn loadSegments(fd: posix.fd_t, ehdr: *const elf.Elf64_Ehdr, phdr: [*]const elf.
         );
 
         try posix.lseek_SET(fd, p.p_offset);
-        const dest: [*]u8 = @ptrFromInt(@intFromPtr(mapped.ptr) + off);
+        const dest: [*]u8 = mapped.ptr + off;
         try utils.readExact(fd, dest[0..p.p_filesz]);
 
         try posix.mprotect(@alignCast(mapped.ptr[0..sz]), utils.pflags(p.p_flags));
@@ -185,11 +187,11 @@ fn buildStack(
     const dest: [*][*:0]const u8 = @ptrCast(new_argv);
     @memmove(dest, argv);
 
-    const env_aux_dst: [*]usize = @ptrCast(new_argv + argc);
+    const env_aux_dst = sp + 1 + argc;
     @memmove(env_aux_dst, env_start[0..env_aux_len]);
 
     // Locate auxv in the new stack (skip envp null terminator)
-    var env_p: [*]usize = @ptrCast(&new_argv[argc + 1]);
+    var env_p = sp + 1 + argc + 1;
     while (env_p[0] != 0) : (env_p += 1) {}
     env_p += 1;
 
@@ -348,7 +350,7 @@ pub fn Loader(
 
             print("Calling trampo...file: {s}, interp: {s}\n", .{
                 file,
-                if (prog.interp) |p| p else @as([*:0]const u8, "(none)"),
+                if (prog.interp) |p| p else "(none)",
             });
 
             // 5. Jump to the dynamic loader (or directly to the program)
