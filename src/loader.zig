@@ -19,8 +19,10 @@ fn checkEhdr(ehdr: *const elf.Elf64_Ehdr) bool {
         (ehdr.e_type == .EXEC or ehdr.e_type == .DYN);
 }
 
+const LoadElfError = error{MmapFailed, SeekFailed, ReadFailed, MprotectFailed};
+
 // Load ELF into anonymous memory
-fn loadelfAnon(fd: c_int, ehdr: *const elf.Elf64_Ehdr, phdr: [*]const elf.Elf64_Phdr) ?usize {
+fn loadelfAnon(fd: c_int, ehdr: *const elf.Elf64_Ehdr, phdr: [*]const elf.Elf64_Phdr) LoadElfError!usize {
     var minva: usize = ~@as(usize, 0);
     var maxva: usize = 0;
     const dyn = ehdr.e_type == .DYN;
@@ -44,9 +46,10 @@ fn loadelfAnon(fd: c_int, ehdr: *const elf.Elf64_Ehdr, phdr: [*]const elf.Elf64_
     // Reserve address space
     const base_result = syscalls.mmap(hint, maxva - minva, syscalls.PROT_NONE, flags, -1, 0);
     if (base_result == syscalls.MAP_FAILED) {
-        return null;
+        return error.MmapFailed;
     }
     const base: [*]u8 = @ptrFromInt(base_result);
+    errdefer _ = syscalls.munmap(@ptrCast(base), maxva - minva);
 
     // Map each segment (MAP_FIXED will replace portions of the PROT_NONE reservation)
     for (phdr[0..ehdr.e_phnum]) |p| {
@@ -68,42 +71,37 @@ fn loadelfAnon(fd: c_int, ehdr: *const elf.Elf64_Ehdr, phdr: [*]const elf.Elf64_
             0,
         );
         if (mapped == syscalls.MAP_FAILED) {
-            _ = syscalls.munmap(@ptrCast(base), maxva - minva);
-            return null;
+            return error.MmapFailed;
         }
 
         // Seek and read segment content
         if (syscalls.lseek(fd, @intCast(p.p_offset), syscalls.SEEK_SET) < 0) {
-            _ = syscalls.munmap(@ptrCast(base), maxva - minva);
-            return null;
+            return error.SeekFailed;
         }
 
         const dest: [*]u8 = @ptrFromInt(mapped + off);
         if (utils.readAll(fd, dest, p.p_filesz) != p.p_filesz) {
-            _ = syscalls.munmap(@ptrCast(base), maxva - minva);
-            return null;
+            return error.ReadFailed;
         }
 
         // Set final protections
         if (syscalls.mprotect(@ptrFromInt(mapped), sz, utils.pflags(p.p_flags)) < 0) {
-            _ = syscalls.munmap(@ptrCast(base), maxva - minva);
-            return null;
+            return error.MprotectFailed;
         }
     }
 
     return @intFromPtr(base);
 }
 
-// Error exit
-fn errx(eval: c_int, msg: [*:0]const u8, arg: ?[*:0]const u8) noreturn {
+fn errx(msg: [*:0]const u8, file: ?[*:0]const u8) noreturn {
     printf.fputs("error: ", 2);
-    if (arg) |a| {
-        printf.printf(msg, &[_]printf.FormatArg{printf.FormatArg.fromStr(a)});
-    } else {
-        printf.fputs(msg, 2);
+    printf.fputs(msg, 2);
+    if (file) |f| {
+        printf.fputs(": ", 2);
+        printf.fputs(f, 2);
     }
     printf.fputs("\n", 2);
-    syscalls.exit(eval);
+    syscalls.exit(1);
 }
 
 // Generic Loader configured by main.zig
@@ -113,6 +111,16 @@ pub fn Loader(
 ) type {
     return struct {
         const Self = @This();
+
+        pub const _start = {};
+
+        pub fn panic(_: []const u8, _: ?*std.builtin.StackTrace, _: ?usize) noreturn {
+            syscalls.exit(1);
+        }
+
+        comptime {
+            _ = Self.z_start;
+        }
 
         var entry_sp: ?[*]usize = null;
         var interp_base: usize = 0;
@@ -202,47 +210,47 @@ pub fn Loader(
             var i: usize = 0;
             while (true) : (i += 1) {
                 if (i >= 2) {
-                    errx(1, "too many ELF interpreters", null);
+                    errx("too many ELF interpreters", null);
                 }
                 const ehdr = &ehdrs[i];
 
                 // Open file
                 const fd = syscalls.open(current_file, syscalls.O_RDONLY);
                 if (fd < 0) {
-                    errx(1, "can't open %s", current_file);
+                    errx("can't open", current_file);
                 }
 
                 // Read ELF header
                 var ehdr_bytes: [@sizeOf(elf.Elf64_Ehdr)]u8 = undefined;
                 if (utils.readAll(fd, &ehdr_bytes, @sizeOf(elf.Elf64_Ehdr)) != @sizeOf(elf.Elf64_Ehdr)) {
-                    errx(1, "can't read ELF header %s", current_file);
+                    errx("can't read ELF header", current_file);
                 }
                 ehdr.* = @bitCast(ehdr_bytes);
 
                 if (!checkEhdr(ehdr)) {
-                    errx(1, "bogus or incompatible ELF header %s", current_file);
+                    errx("bogus or incompatible ELF header", current_file);
                 }
 
                 // Read program headers
                 const MAX_PHNUM = 16;
                 if (ehdr.e_phnum > MAX_PHNUM) {
-                    errx(1, "too many program headers in %s", current_file);
+                    errx("too many program headers", current_file);
                 }
                 const phdr_size = @as(usize, ehdr.e_phnum) * @sizeOf(elf.Elf64_Phdr);
                 var phdr_buf: [MAX_PHNUM * @sizeOf(elf.Elf64_Phdr)]u8 align(@alignOf(elf.Elf64_Phdr)) = undefined;
 
                 if (syscalls.lseek(fd, @intCast(ehdr.e_phoff), syscalls.SEEK_SET) < 0) {
-                    errx(1, "can't lseek to program header %s", current_file);
+                    errx("can't lseek to program header", current_file);
                 }
                 if (utils.readAll(fd, &phdr_buf, phdr_size) != phdr_size) {
-                    errx(1, "can't read program header %s", current_file);
+                    errx("can't read program header", current_file);
                 }
 
                 const phdr: [*]const elf.Elf64_Phdr = @ptrCast(@alignCast(&phdr_buf));
 
                 // Load ELF
-                base[i] = loadelfAnon(fd, ehdr, phdr) orelse {
-                    errx(1, "can't load ELF %s", current_file);
+                base[i] = loadelfAnon(fd, ehdr, phdr) catch {
+                    errx("can't load ELF", current_file);
                 };
 
                 // Calculate entry point
@@ -263,16 +271,16 @@ pub fn Loader(
 
                     // Read interpreter path
                     if (ph.p_filesz >= PATH_MAX) {
-                        errx(1, "interpreter path too long", null);
+                        errx("interpreter path too long", null);
                     }
                     var interp_buf: [PATH_MAX]u8 = undefined;
                     if (syscalls.lseek(fd, @intCast(ph.p_offset), syscalls.SEEK_SET) < 0) {
-                        errx(1, "can't lseek interp segment", null);
+                        errx("can't lseek interp segment", null);
                     }
 
                     const interp_size = ph.p_filesz;
                     if (utils.readAll(fd, &interp_buf, interp_size) != interp_size) {
-                        errx(1, "can't read interp segment", null);
+                        errx("can't read interp segment", null);
                     }
                     interp_buf[interp_size] = 0;
 

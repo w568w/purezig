@@ -5,7 +5,6 @@
 const loader = @import("loader.zig");
 const syscalls = @import("syscalls.zig");
 const printf = @import("printf.zig");
-const utils = @import("utils.zig");
 const fdl = @import("fdl_resolve.zig");
 
 const DL_APP_DEFAULT: [*:0]const u8 = "/bin/sleep";
@@ -62,16 +61,6 @@ fn fdlMain(ctx: *fdl.Context) void {
     printf.puts("Done");
 }
 
-// Instantiate the Loader with our callbacks
 const LoaderImpl = loader.Loader(appMain, fdlMain);
-
-// Panic handler for freestanding environment
-pub fn panic(_: []const u8, _: ?*@import("std").builtin.StackTrace, _: ?usize) noreturn {
-    syscalls.exit(1);
-}
-
-// Ensure required symbols are exported
-comptime {
-    _ = LoaderImpl.z_start;
-    _ = utils.memset;
-}
+pub const _start = LoaderImpl._start;
+pub const panic = LoaderImpl.panic;

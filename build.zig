@@ -6,7 +6,7 @@ pub fn build(b: *std.Build) void {
     // Freestanding target (uses Linux syscalls directly)
     const target = b.resolveTargetQuery(.{
         .cpu_arch = .x86_64,
-        .os_tag = .freestanding,
+        .os_tag = .linux,
         .abi = .none,
     });
 
@@ -45,7 +45,7 @@ pub fn build(b: *std.Build) void {
             .link_libc = true,
         }),
     });
-    example_lib.addCSourceFile(.{ .file = b.path("src/example.c") });
+    example_lib.root_module.addCSourceFile(.{ .file = b.path("src/example.c") });
     b.installArtifact(example_lib);
 
     simple_step.dependOn(&example_lib.step);

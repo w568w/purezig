@@ -39,20 +39,6 @@ const OutputBuffer = struct {
 
 var output = OutputBuffer{};
 
-fn putcharFd(c: u8, fd: c_int) void {
-    output.putchar(c, fd);
-}
-
-fn putstrFd(s: [*:0]const u8, fd: c_int) void {
-    output.putstr(s, fd);
-}
-
-fn flushBuf() void {
-    output.flush();
-}
-
-const utils = @import("utils.zig");
-
 fn kprintn(fd: c_int, val: u64, base: u64, min_width: usize) void {
     const digits = "0123456789abcdef";
     var buf: [22]u8 = undefined;
@@ -60,10 +46,9 @@ fn kprintn(fd: c_int, val: u64, base: u64, min_width: usize) void {
     var ul = val;
 
     while (ul != 0 or p < min_width) {
-        const dm = utils.divmod(ul, base);
-        buf[p] = digits[@intCast(dm.rem)];
+        buf[p] = digits[@intCast(ul % base)];
         p += 1;
-        ul = dm.quot;
+        ul /= base;
         if (ul == 0 and min_width == 0) break;
     }
     if (p == 0) {
@@ -73,18 +58,18 @@ fn kprintn(fd: c_int, val: u64, base: u64, min_width: usize) void {
 
     while (p > 0) {
         p -= 1;
-        putcharFd(buf[p], fd);
+        output.putchar(buf[p], fd);
     }
 }
 
 // Runtime format string parser
-pub fn vfdprintf(fd: c_int, fmt: [*:0]const u8, args: []const FormatArg) void {
+pub fn fdprintf(fd: c_int, fmt: [*:0]const u8, args: []const FormatArg) void {
     var i: usize = 0;
     var arg_idx: usize = 0;
 
     while (fmt[i] != 0) {
         if (fmt[i] != '%') {
-            putcharFd(fmt[i], fd);
+            output.putchar(fmt[i], fd);
             i += 1;
             continue;
         }
@@ -105,7 +90,7 @@ pub fn vfdprintf(fd: c_int, fmt: [*:0]const u8, args: []const FormatArg) void {
         i += 1;
 
         if (arg_idx >= args.len) {
-            putcharFd('?', fd);
+            output.putchar('?', fd);
             continue;
         }
 
@@ -114,20 +99,20 @@ pub fn vfdprintf(fd: c_int, fmt: [*:0]const u8, args: []const FormatArg) void {
 
         switch (spec) {
             'c' => {
-                putcharFd(@truncate(arg.asUint() & 0x7f), fd);
+                output.putchar(@truncate(arg.asUint() & 0x7f), fd);
             },
             's' => {
                 switch (arg) {
-                    .str => |s| putstrFd(s, fd),
-                    .slice => |s| for (s) |c| putcharFd(c, fd),
-                    .ptr => |p| if (p != 0) putstrFd(@ptrFromInt(p), fd) else putstrFd("(null)", fd),
-                    else => putstrFd("(null)", fd),
+                    .str => |s| output.putstr(s, fd),
+                    .slice => |s| for (s) |c| output.putchar(c, fd),
+                    .ptr => |p| if (p != 0) output.putstr(@ptrFromInt(p), fd) else output.putstr("(null)", fd),
+                    else => output.putstr("(null)", fd),
                 }
             },
             'd' => {
                 const val = if (lflag) arg.asInt() else @as(i64, @as(i32, @truncate(arg.asInt())));
                 if (val < 0) {
-                    putcharFd('-', fd);
+                    output.putchar('-', fd);
                     kprintn(fd, @intCast(-val), 10, 0);
                 } else {
                     kprintn(fd, @intCast(val), 10, 0);
@@ -142,8 +127,8 @@ pub fn vfdprintf(fd: c_int, fmt: [*:0]const u8, args: []const FormatArg) void {
                 kprintn(fd, val, 8, 0);
             },
             'p' => {
-                putcharFd('0', fd);
-                putcharFd('x', fd);
+                output.putchar('0', fd);
+                output.putchar('x', fd);
                 kprintn(fd, arg.asUint(), 16, 0);
             },
             'x' => {
@@ -156,19 +141,19 @@ pub fn vfdprintf(fd: c_int, fmt: [*:0]const u8, args: []const FormatArg) void {
                 kprintn(fd, val, 16, width);
             },
             '%' => {
-                putcharFd('%', fd);
+                output.putchar('%', fd);
                 arg_idx -= 1; // Don't consume an argument
             },
             else => {
-                putcharFd('%', fd);
-                if (lflag) putcharFd('l', fd);
-                putcharFd(spec, fd);
+                output.putchar('%', fd);
+                if (lflag) output.putchar('l', fd);
+                output.putchar(spec, fd);
                 arg_idx -= 1;
             },
         }
     }
 
-    flushBuf();
+    output.flush();
 }
 
 // Format argument tagged union
@@ -217,23 +202,18 @@ pub const FormatArg = union(enum) {
     }
 };
 
-// Convenience wrappers
 pub fn printf(fmt: [*:0]const u8, args: []const FormatArg) void {
-    vfdprintf(2, fmt, args);
-}
-
-pub fn fdprintf(fd: c_int, fmt: [*:0]const u8, args: []const FormatArg) void {
-    vfdprintf(fd, fmt, args);
+    fdprintf(2, fmt, args);
 }
 
 // Simple string output without formatting
 pub fn puts(s: [*:0]const u8) void {
-    putstrFd(s, 2);
-    putcharFd('\n', 2);
-    flushBuf();
+    output.putstr(s, 2);
+    output.putchar('\n', 2);
+    output.flush();
 }
 
 pub fn fputs(s: [*:0]const u8, fd: c_int) void {
-    putstrFd(s, fd);
-    flushBuf();
+    output.putstr(s, fd);
+    output.flush();
 }

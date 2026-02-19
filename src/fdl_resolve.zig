@@ -59,9 +59,7 @@ const Module = struct {
     dynstr: ?[*:0]const u8 = null,
 };
 
-fn u32Mod(a: u32, m: u32) u32 {
-    return @intCast(utils.divmod(a, m).rem);
-}
+
 
 // Helper: convert DT_* pointer/offset to absolute VA
 fn dynPtr(base: usize, lo: usize, hi: usize, p: usize) usize {
@@ -289,7 +287,7 @@ fn lookupGnu(m: *const Module, name: [*:0]const u8) ?*const elf.Elf64_Sym {
         return null;
     }
 
-    var idx = m.gnu_buckets.?[u32Mod(h, m.gnu_nbucket)];
+    var idx = m.gnu_buckets.?[h % m.gnu_nbucket];
     if (idx == 0) return null;
 
     while (true) {
@@ -315,7 +313,7 @@ fn lookupSysv(m: *const Module, name: [*:0]const u8) ?*const elf.Elf64_Sym {
     if (m.buckets == null) return null;
 
     const h = sysvHash(name);
-    var i = m.buckets.?[u32Mod(h, m.nbucket)];
+    var i = m.buckets.?[h % m.nbucket];
 
     while (i != 0) {
         const sym = &m.dynsym.?[i];
