@@ -3,7 +3,8 @@
 
 const std = @import("std");
 const elf = std.elf;
-const syscalls = @import("syscalls.zig");
+const linux = std.os.linux;
+const posix = std.posix;
 const utils = @import("utils.zig");
 const fdl_resolve = @import("fdl_resolve.zig");
 
@@ -20,10 +21,10 @@ fn checkEhdr(ehdr: *const elf.Elf64_Ehdr) bool {
         (ehdr.e_type == .EXEC or ehdr.e_type == .DYN);
 }
 
-const LoadElfError = error{MmapFailed, SeekFailed, ReadFailed, MprotectFailed};
+const LoadElfError = posix.MMapError || posix.SeekError || posix.MProtectError || error{ReadFailed};
 
 // Load ELF into anonymous memory
-fn loadelfAnon(fd: c_int, ehdr: *const elf.Elf64_Ehdr, phdr: [*]const elf.Elf64_Phdr) LoadElfError!usize {
+fn loadelfAnon(fd: posix.fd_t, ehdr: *const elf.Elf64_Ehdr, phdr: [*]const elf.Elf64_Phdr) LoadElfError!usize {
     var minva: usize = ~@as(usize, 0);
     var maxva: usize = 0;
     const dyn = ehdr.e_type == .DYN;
@@ -39,59 +40,51 @@ fn loadelfAnon(fd: c_int, ehdr: *const elf.Elf64_Ehdr, phdr: [*]const elf.Elf64_
     minva = utils.truncPg(minva);
     maxva = utils.roundPg(maxva);
 
-    // For dynamic ELF let the kernel choose the address
-    const hint: ?*anyopaque = if (dyn) null else @ptrFromInt(minva);
-    var flags: c_int = if (dyn) 0 else syscalls.MAP_FIXED;
-    flags |= syscalls.MAP_PRIVATE | syscalls.MAP_ANONYMOUS;
-
     // Reserve address space
-    const base_result = syscalls.mmap(hint, maxva - minva, syscalls.PROT_NONE, flags, -1, 0);
-    if (base_result == syscalls.MAP_FAILED) {
-        return error.MmapFailed;
-    }
-    const base: [*]u8 = @ptrFromInt(base_result);
-    errdefer _ = syscalls.munmap(@ptrCast(base), maxva - minva);
+    const hint: ?[*]align(utils.PAGE_SIZE) u8 = if (dyn) null else @ptrFromInt(minva);
+    const reservation = try posix.mmap(
+        hint,
+        maxva - minva,
+        linux.PROT.NONE,
+        .{ .TYPE = .PRIVATE, .ANONYMOUS = true, .FIXED = !dyn },
+        -1,
+        0,
+    );
+    const base: usize = @intFromPtr(reservation.ptr);
+    errdefer posix.munmap(reservation);
 
     // Map each segment (MAP_FIXED will replace portions of the PROT_NONE reservation)
     for (phdr[0..ehdr.e_phnum]) |p| {
         if (p.p_type != elf.PT_LOAD) continue;
 
         const off = p.p_vaddr & utils.PAGE_MASK;
-        const start_addr: usize = if (dyn) @intFromPtr(base) else 0;
+        const start_addr: usize = if (dyn) base else 0;
         const seg_start = start_addr + utils.truncPg(p.p_vaddr);
         const sz = utils.roundPg(p.p_memsz + off);
 
         // Map segment with read/write for loading
-        const map_flags = syscalls.MAP_FIXED | syscalls.MAP_ANONYMOUS | syscalls.MAP_PRIVATE;
-        const mapped = syscalls.mmap(
+        const mapped = try posix.mmap(
             @ptrFromInt(seg_start),
             sz,
-            syscalls.PROT_READ | syscalls.PROT_WRITE,
-            map_flags,
+            linux.PROT.READ | linux.PROT.WRITE,
+            .{ .TYPE = .PRIVATE, .ANONYMOUS = true, .FIXED = true },
             -1,
             0,
         );
-        if (mapped == syscalls.MAP_FAILED) {
-            return error.MmapFailed;
-        }
 
         // Seek and read segment content
-        if (syscalls.lseek(fd, @intCast(p.p_offset), syscalls.SEEK_SET) < 0) {
-            return error.SeekFailed;
-        }
+        try posix.lseek_SET(fd, p.p_offset);
 
-        const dest: [*]u8 = @ptrFromInt(mapped + off);
+        const dest: [*]u8 = @ptrFromInt(@intFromPtr(mapped.ptr) + off);
         if (utils.readAll(fd, dest, p.p_filesz) != p.p_filesz) {
             return error.ReadFailed;
         }
 
         // Set final protections
-        if (syscalls.mprotect(@ptrFromInt(mapped), sz, utils.pflags(p.p_flags)) < 0) {
-            return error.MprotectFailed;
-        }
+        try posix.mprotect(@alignCast(mapped.ptr[0..sz]), utils.pflags(p.p_flags));
     }
 
-    return @intFromPtr(base);
+    return base;
 }
 
 fn errx(msg: [*:0]const u8, file: ?[*:0]const u8) noreturn {
@@ -100,7 +93,7 @@ fn errx(msg: [*:0]const u8, file: ?[*:0]const u8) noreturn {
     } else {
         print("error: {s}\n", .{msg});
     }
-    syscalls.exit(1);
+    linux.exit(1);
 }
 
 // Generic Loader configured by main.zig
@@ -114,7 +107,7 @@ pub fn Loader(
         pub const _start = {};
 
         pub fn panic(_: []const u8, _: ?*std.builtin.StackTrace, _: ?usize) noreturn {
-            syscalls.exit(1);
+            linux.exit(1);
         }
 
         comptime {
@@ -166,11 +159,11 @@ pub fn Loader(
             print("Loader is in memory... Start parsing logic\n", .{});
 
             var ctx = fdl_resolve.init(interp_base) catch {
-                syscalls.exit(1);
+                linux.exit(1);
             };
             fdl_main(&ctx);
 
-            syscalls.exit(0);
+            linux.exit(0);
         }
 
         // z_fdl_entry: Entry point after dynamic loader initializes
@@ -243,10 +236,9 @@ pub fn Loader(
                 const ehdr = &ehdrs[i];
 
                 // Open file
-                const fd = syscalls.open(current_file, syscalls.O_RDONLY);
-                if (fd < 0) {
+                const fd = posix.openZ(current_file, .{}, 0) catch {
                     errx("can't open", current_file);
-                }
+                };
 
                 // Read ELF header
                 var ehdr_bytes: [@sizeOf(elf.Elf64_Ehdr)]u8 = undefined;
@@ -267,9 +259,9 @@ pub fn Loader(
                 const phdr_size = @as(usize, ehdr.e_phnum) * @sizeOf(elf.Elf64_Phdr);
                 var phdr_buf: [MAX_PHNUM * @sizeOf(elf.Elf64_Phdr)]u8 align(@alignOf(elf.Elf64_Phdr)) = undefined;
 
-                if (syscalls.lseek(fd, @intCast(ehdr.e_phoff), syscalls.SEEK_SET) < 0) {
+                posix.lseek_SET(fd, ehdr.e_phoff) catch {
                     errx("can't lseek to program header", current_file);
-                }
+                };
                 if (utils.readAll(fd, &phdr_buf, phdr_size) != phdr_size) {
                     errx("can't read program header", current_file);
                 }
@@ -289,7 +281,7 @@ pub fn Loader(
 
                 // If we just loaded the interpreter, we're done
                 if (elf_interp != null and @intFromPtr(current_file) == @intFromPtr(elf_interp.?)) {
-                    _ = syscalls.close(fd);
+                    posix.close(fd);
                     break;
                 }
 
@@ -302,9 +294,9 @@ pub fn Loader(
                         errx("interpreter path too long", null);
                     }
                     var interp_buf: [PATH_MAX]u8 = undefined;
-                    if (syscalls.lseek(fd, @intCast(ph.p_offset), syscalls.SEEK_SET) < 0) {
+                    posix.lseek_SET(fd, ph.p_offset) catch {
                         errx("can't lseek interp segment", null);
-                    }
+                    };
 
                     const interp_size = ph.p_filesz;
                     if (utils.readAll(fd, &interp_buf, interp_size) != interp_size) {
@@ -319,7 +311,7 @@ pub fn Loader(
                     current_file = elf_interp.?;
                 }
 
-                _ = syscalls.close(fd);
+                posix.close(fd);
 
                 // If no interpreter, we're done
                 if (elf_interp == null) {
@@ -369,7 +361,7 @@ pub fn Loader(
             trampo(target_entry, sp);
 
             // Should not reach
-            syscalls.exit(0);
+            linux.exit(0);
         }
 
         // z_start: Program entry point

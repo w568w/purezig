@@ -4,7 +4,7 @@
 const std = @import("std");
 const elf = std.elf;
 const mem = std.mem;
-const syscalls = @import("syscalls.zig");
+const posix = std.posix;
 const utils = @import("utils.zig");
 
 const print = std.debug.print;
@@ -111,12 +111,11 @@ fn parseMapsLine(line: []const u8) ?MapsEntry {
 fn findLibcBase() ?usize {
     if (cached_libc_base) |base| return base;
 
-    const fd = syscalls.open(MAPS_PATH, syscalls.O_RDONLY);
-    if (fd < 0) return null;
+    const fd = posix.openZ(MAPS_PATH, .{}, 0) catch return null;
+    defer posix.close(fd);
 
     var buf: [MAPS_BUF_SIZE]u8 = undefined;
     const n = utils.readAll(fd, &buf, buf.len - 1);
-    _ = syscalls.close(fd);
     if (n == 0) return null;
 
     var lines = mem.splitScalar(u8, buf[0..n], '\n');

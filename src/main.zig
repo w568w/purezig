@@ -4,7 +4,6 @@
 
 const std = @import("std");
 const loader = @import("loader.zig");
-const syscalls = @import("syscalls.zig");
 const fdl = @import("fdl_resolve.zig");
 
 const print = std.debug.print;
