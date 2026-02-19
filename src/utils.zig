@@ -11,14 +11,15 @@ pub fn strcmp(a: [*:0]const u8, b: [*:0]const u8) c_int {
     return @as(c_int, a[i]) - @as(c_int, b[i]);
 }
 
-pub fn readAll(fd: posix.fd_t, buf: [*]u8, sz: usize) usize {
+pub const ReadExactError = posix.ReadError || error{EndOfStream};
+
+pub fn readExact(fd: posix.fd_t, buf: []u8) ReadExactError!void {
     var off: usize = 0;
-    while (off < sz) {
-        const n = posix.read(fd, buf[off..sz]) catch break;
-        if (n == 0) break;
+    while (off < buf.len) {
+        const n = try posix.read(fd, buf[off..]);
+        if (n == 0) return error.EndOfStream;
         off += n;
     }
-    return off;
 }
 
 // Page alignment helpers

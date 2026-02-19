@@ -115,7 +115,7 @@ fn findLibcBase() ?usize {
     defer posix.close(fd);
 
     var buf: [MAPS_BUF_SIZE]u8 = undefined;
-    const n = utils.readAll(fd, &buf, buf.len - 1);
+    const n = posix.read(fd, &buf) catch return null;
     if (n == 0) return null;
 
     var lines = mem.splitScalar(u8, buf[0..n], '\n');
