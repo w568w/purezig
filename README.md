@@ -24,7 +24,13 @@ Read [`example/src/simple.zig`](example/src/simple.zig) for a minimal example.
 
 ### 3.1 As a dependency
 
-Add `foreign_dlopen` to your `build.zig.zon`:
+Add `foreign_dlopen` to your `build.zig.zon` by running:
+
+```bash
+zig fetch --save git+https://github.com/w568w/purezig.git
+```
+
+Or add it manually:
 
 ```zig
 .dependencies = .{
@@ -53,6 +59,7 @@ pub fn build(b: *std.Build) void {
         .name = "my_app",
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/main.zig"),
+            // 1. Use target triple x86_64-linux-none
             .target = b.resolveTargetQuery(.{
                 .cpu_arch = .x86_64,
                 .os_tag = .linux,
@@ -64,10 +71,13 @@ pub fn build(b: *std.Build) void {
             .stack_check = false,
             .unwind_tables = .none,
             .link_libc = false,
+            // 2. Import the foreign_dlopen module
             .imports = &.{.{ .name = "foreign_dlopen", .module = fdl_mod }},
         }),
+        // 3. Self-hosted compiler has some bugs and builds broken executables atm, so we need to use llvm to build the final binary.
         .use_llvm = true,
     });
+    // 4. Configure the executable with the helper function, which sets the entry point.
     foreign_dlopen.configureExe(exe);
     b.installArtifact(exe);
 }
@@ -78,11 +88,12 @@ Then in your source file:
 ```zig
 const fdl = @import("foreign_dlopen");
 
+// 4. Define the two entry points: appMain is the main function of our application, and fdlMain is called by the hijacked ELF binary after the dynamic linker has initialized.
 fn appMain(_: c_int, _: [*][*:0]u8) c_int {
     // Pick any dynamically-linked ELF on the system as a "host" binary.
     // Its dynamic linker will be loaded, giving us access to dlopen/dlsym.
     Impl.execElf("/bin/sleep", &.{ "/bin/sleep", "0" });
-    return 1;
+    return 1; // <- This should never be reached.
 }
 
 fn fdlMain(ctx: *fdl.Context) void {
@@ -92,8 +103,11 @@ fn fdlMain(ctx: *fdl.Context) void {
     _ = puts("Hello from a static binary!");
 }
 
+// 1. Declare the entry points with fdl.Entry, which sets up the necessary boilerplate to jump into our code after the dynamic linker has initialized.
 const Impl = fdl.Entry(appMain, fdlMain);
+// 2. _start is required when .os_tag = .linux, although it is not actually used in our scenario.
 pub const _start = Impl._start;
+// 3. Declare the panic handler.
 pub const panic = Impl.panic;
 ```
 
