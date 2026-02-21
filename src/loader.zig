@@ -6,7 +6,6 @@ const elf = std.elf;
 const mem = std.mem;
 const linux = std.os.linux;
 const posix = std.posix;
-const utils = @import("utils.zig");
 const fdl_resolve = @import("fdl_resolve.zig");
 
 const print = std.debug.print;
@@ -15,6 +14,25 @@ const PAGE_SIZE = std.heap.page_size_min;
 const PATH_MAX = 4096;
 const MAX_PHNUM = 16;
 
+const ReadExactError = posix.ReadError || error{EndOfStream};
+
+fn readExact(fd: posix.fd_t, buf: []u8) ReadExactError!void {
+    var off: usize = 0;
+    while (off < buf.len) {
+        const n = try posix.read(fd, buf[off..]);
+        if (n == 0) return error.EndOfStream;
+        off += n;
+    }
+}
+
+inline fn pflags(x: u32) u32 {
+    var prot: u32 = 0;
+    if (x & elf.PF_X != 0) prot |= linux.PROT.EXEC;
+    if (x & elf.PF_W != 0) prot |= linux.PROT.WRITE;
+    if (x & elf.PF_R != 0) prot |= linux.PROT.READ;
+    return prot;
+}
+
 fn checkEhdr(ehdr: *const elf.Elf64_Ehdr) bool {
     return std.mem.startsWith(u8, &ehdr.e_ident, elf.MAGIC) and
         ehdr.e_ident[elf.EI_CLASS] == elf.ELFCLASS64 and
@@ -22,7 +40,7 @@ fn checkEhdr(ehdr: *const elf.Elf64_Ehdr) bool {
         (ehdr.e_type == .EXEC or ehdr.e_type == .DYN);
 }
 
-const LoadElfError = posix.MMapError || posix.SeekError || posix.MProtectError || utils.ReadExactError;
+const LoadElfError = posix.MMapError || posix.SeekError || posix.MProtectError || ReadExactError;
 
 /// Map ELF PT_LOAD segments into anonymous memory.
 /// Returns the base address of the loaded image.
@@ -73,9 +91,9 @@ fn loadSegments(fd: posix.fd_t, ehdr: *const elf.Elf64_Ehdr, phdr: [*]const elf.
 
         try posix.lseek_SET(fd, p.p_offset);
         const dest: [*]u8 = mapped.ptr + off;
-        try utils.readExact(fd, dest[0..p.p_filesz]);
+        try readExact(fd, dest[0..p.p_filesz]);
 
-        try posix.mprotect(@alignCast(mapped.ptr[0..sz]), utils.pflags(p.p_flags));
+        try posix.mprotect(@alignCast(mapped.ptr[0..sz]), pflags(p.p_flags));
     }
 
     return base;
@@ -100,7 +118,7 @@ fn readElf(path: [*:0]const u8, interp_buf: *[PATH_MAX]u8) ElfInfo {
 
     // Read and validate ELF header
     var ehdr_bytes: [@sizeOf(elf.Elf64_Ehdr)]u8 = undefined;
-    utils.readExact(fd, &ehdr_bytes) catch {
+    readExact(fd, &ehdr_bytes) catch {
         errx("can't read ELF header", path);
     };
     const ehdr: elf.Elf64_Ehdr = @bitCast(ehdr_bytes);
@@ -119,7 +137,7 @@ fn readElf(path: [*:0]const u8, interp_buf: *[PATH_MAX]u8) ElfInfo {
     posix.lseek_SET(fd, ehdr.e_phoff) catch {
         errx("can't seek to program headers", path);
     };
-    utils.readExact(fd, phdr_buf[0..phdr_size]) catch {
+    readExact(fd, phdr_buf[0..phdr_size]) catch {
         errx("can't read program headers", path);
     };
     const phdr: [*]const elf.Elf64_Phdr = @ptrCast(@alignCast(&phdr_buf));
@@ -140,7 +158,7 @@ fn readElf(path: [*:0]const u8, interp_buf: *[PATH_MAX]u8) ElfInfo {
         posix.lseek_SET(fd, ph.p_offset) catch {
             errx("can't seek to interpreter path", path);
         };
-        utils.readExact(fd, interp_buf[0..ph.p_filesz]) catch {
+        readExact(fd, interp_buf[0..ph.p_filesz]) catch {
             errx("can't read interpreter path", path);
         };
         interp_buf[ph.p_filesz] = 0;

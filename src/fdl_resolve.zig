@@ -45,20 +45,15 @@ const Module = struct {
     chains: ?[*]const u32 = null,
 
     // GNU hash table
-    gnu_nbucket: u32 = 0,
-    gnu_symoffset: u32 = 0,
-    gnu_maskwords: u32 = 0,
-    gnu_shift2: u32 = 0,
+    gnu_hash: ?*const elf.gnu_hash.Header = null,
     gnu_bloom: ?[*]const usize = null,
     gnu_buckets: ?[*]const u32 = null,
-    gnu_chain: ?[*]const u32 = null,
+    gnu_chain: ?[*]const elf.gnu_hash.ChainEntry = null,
 
     // Symbol/string tables
     dynsym: ?[*]const elf.Elf64_Sym = null,
     dynstr: ?[*:0]const u8 = null,
 };
-
-
 
 // Helper: convert DT_* pointer/offset to absolute VA
 fn dynPtr(base: usize, lo: usize, hi: usize, p: usize) usize {
@@ -214,14 +209,12 @@ fn modInit(m: *Module, base: usize) ModInitError!void {
                 m.chains = h + 2 + m.nbucket;
             },
             elf.DT_GNU_HASH => {
-                const gh: [*]const u32 = @ptrFromInt(dynPtr(base, lo, hi, d.d_val));
-                m.gnu_nbucket = gh[0];
-                m.gnu_symoffset = gh[1];
-                m.gnu_maskwords = gh[2];
-                m.gnu_shift2 = gh[3];
-                m.gnu_bloom = @ptrCast(@alignCast(gh + 4));
-                m.gnu_buckets = @ptrCast(m.gnu_bloom.? + m.gnu_maskwords);
-                m.gnu_chain = @ptrCast(m.gnu_buckets.? + m.gnu_nbucket);
+                const gh: *const elf.gnu_hash.Header = @ptrFromInt(dynPtr(base, lo, hi, d.d_val));
+                m.gnu_hash = gh;
+                const bloom: [*]const usize = @ptrCast(@alignCast(@as([*]const u8, @ptrCast(gh)) + @sizeOf(elf.gnu_hash.Header)));
+                m.gnu_bloom = bloom;
+                m.gnu_buckets = @ptrCast(bloom + gh.bloom_size);
+                m.gnu_chain = @ptrCast(m.gnu_buckets.? + gh.nbuckets);
             },
             else => {},
         }
@@ -253,34 +246,26 @@ fn sysvHash(name: [*:0]const u8) u32 {
     return h;
 }
 
-// GNU hash function
-fn gnuHash(name: [*:0]const u8) u32 {
-    var h: u32 = 5381;
-    for (mem.span(name)) |c| {
-        h = (h *% 33) +% c;
-    }
-    return h;
-}
-
 // GNU hash lookup
 fn lookupGnu(m: *const Module, name: [*:0]const u8) ?*const elf.Elf64_Sym {
-    if (m.gnu_buckets == null) return null;
+    const gh = m.gnu_hash orelse return null;
 
-    const h = gnuHash(name);
-    const bloom_idx = (h / (@sizeOf(usize) * 8)) & (m.gnu_maskwords - 1);
-    const bitmask = (@as(usize, 1) << @intCast(h % (@sizeOf(usize) * 8))) |
-        (@as(usize, 1) << @intCast((h >> @intCast(m.gnu_shift2)) % (@sizeOf(usize) * 8)));
+    const h = elf.gnu_hash.calculate(mem.span(name));
+    const hash_entry: elf.gnu_hash.ChainEntry = @bitCast(h);
+    const bloom_idx = (h / @bitSizeOf(usize)) & (gh.bloom_size - 1);
+    const bitmask = (@as(usize, 1) << @intCast(h % @bitSizeOf(usize))) |
+        (@as(usize, 1) << @intCast((h >> @intCast(gh.bloom_shift)) % @bitSizeOf(usize)));
 
     if ((m.gnu_bloom.?[bloom_idx] & bitmask) != bitmask) {
         return null;
     }
 
-    var idx = m.gnu_buckets.?[h % m.gnu_nbucket];
+    var idx = m.gnu_buckets.?[h % gh.nbuckets];
     if (idx == 0) return null;
 
     while (true) {
-        const hv = m.gnu_chain.?[idx - m.gnu_symoffset];
-        if ((hv | 1) == (h | 1)) {
+        const entry = m.gnu_chain.?[idx - gh.symoffset];
+        if (entry.hash == hash_entry.hash) {
             const sym = &m.dynsym.?[idx];
             if (sym.st_name != 0) {
                 const sym_name: [*:0]const u8 = @ptrCast(m.dynstr.? + sym.st_name);
@@ -289,7 +274,7 @@ fn lookupGnu(m: *const Module, name: [*:0]const u8) ?*const elf.Elf64_Sym {
                 }
             }
         }
-        if ((hv & 1) != 0) break;
+        if (entry.end_of_chain) break;
         idx += 1;
     }
 
