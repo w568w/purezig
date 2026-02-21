@@ -11,7 +11,7 @@ const fdl_resolve = @import("fdl_resolve.zig");
 const print = std.debug.print;
 
 const PAGE_SIZE = std.heap.page_size_min;
-const PATH_MAX = 4096;
+const PATH_MAX = posix.PATH_MAX;
 const MAX_PHNUM = 16;
 
 const ReadExactError = posix.ReadError || error{EndOfStream};
@@ -45,7 +45,7 @@ const LoadElfError = posix.MMapError || posix.SeekError || posix.MProtectError |
 /// Map ELF PT_LOAD segments into anonymous memory.
 /// Returns the base address of the loaded image.
 fn loadSegments(fd: posix.fd_t, ehdr: *const elf.Elf64_Ehdr, phdr: [*]const elf.Elf64_Phdr) LoadElfError!usize {
-    var minva: usize = ~@as(usize, 0);
+    var minva: usize = std.math.maxInt(usize);
     var maxva: usize = 0;
     const dyn = ehdr.e_type == .DYN;
 
