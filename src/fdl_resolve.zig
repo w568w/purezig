@@ -8,7 +8,6 @@ const posix = std.posix;
 const print = std.debug.print;
 
 const MAPS_PATH = "/proc/self/maps";
-const MAPS_BUF_SIZE = 64 * 1024;
 
 // RTLD flags for dlopen
 pub const RTLD_LAZY: c_int = 0x0001;
@@ -28,8 +27,6 @@ pub const Context = struct {
         return @ptrCast(ptr);
     }
 };
-
-var cached_libc_base: ?usize = null;
 
 // In-memory ELF module structure
 const Module = struct {
@@ -100,34 +97,72 @@ fn parseMapsLine(line: []const u8) ?MapsEntry {
     return .{ .start = start, .offset = offset, .path = path };
 }
 
-// Find libc base from /proc/self/maps
-fn findLibcBase() ?usize {
-    if (cached_libc_base) |base| return base;
-
-    const fd = posix.openZ(MAPS_PATH, .{}, 0) catch return null;
-    defer posix.close(fd);
-
-    var buf: [MAPS_BUF_SIZE]u8 = undefined;
-    const n = posix.read(fd, &buf) catch return null;
-    if (n == 0) return null;
-
-    var lines = mem.splitScalar(u8, buf[0..n], '\n');
-    while (lines.next()) |line| {
-        if (mem.indexOf(u8, line, "libc") == null) continue;
-
-        if (parseMapsLine(line)) |entry| {
-            if (entry.path != null and entry.offset == 0) {
-                cached_libc_base = entry.start;
-
-                print("libc base 0x{x} @ {s}\n", .{ entry.start, entry.path.? });
-
-                return entry.start;
-            }
-        }
-    }
-
+fn matchLibcLine(line: []const u8) ?usize {
+    if (mem.indexOf(u8, line, "libc") == null) return null;
+    const entry = parseMapsLine(line) orelse return null;
+    if (entry.path != null and entry.offset == 0) return entry.start;
     return null;
 }
+
+const LibcBaseIterator = struct {
+    fd: posix.fd_t,
+    buf: [8192]u8 = undefined,
+    len: usize = 0,
+    start: usize = 0,
+    eof: bool = false,
+
+    fn next(self: *LibcBaseIterator) ?usize {
+        while (true) {
+            if (mem.indexOfScalar(u8, self.buf[self.start..self.len], '\n')) |nl_rel| {
+                const line = self.buf[self.start .. self.start + nl_rel];
+                self.start += nl_rel + 1;
+                if (matchLibcLine(line)) |base| return base;
+                continue;
+            }
+
+            if (self.eof) {
+                if (self.start < self.len) {
+                    const line = self.buf[self.start..self.len];
+                    self.start = self.len;
+                    if (matchLibcLine(line)) |base| return base;
+                }
+                return null;
+            }
+
+            const remainder = self.len - self.start;
+            if (remainder == self.buf.len) {
+                // Line exceeds buffer — skip it entirely
+                self.len = 0;
+                self.start = 0;
+                while (true) {
+                    const n = posix.read(self.fd, &self.buf) catch return null;
+                    if (n == 0) {
+                        self.eof = true;
+                        return null;
+                    }
+                    if (mem.indexOfScalar(u8, self.buf[0..n], '\n')) |nl| {
+                        self.start = nl + 1;
+                        self.len = n;
+                        break;
+                    }
+                }
+                continue;
+            }
+
+            if (remainder > 0) {
+                mem.copyForwards(u8, &self.buf, self.buf[self.start..self.len]);
+            }
+            self.len = remainder;
+            self.start = 0;
+
+            const n = posix.read(self.fd, self.buf[self.len..]) catch return null;
+            if (n == 0) {
+                self.eof = true;
+            }
+            self.len += n;
+        }
+    }
+};
 
 const ModInitError = error{
     InvalidElfHeader,
@@ -312,34 +347,41 @@ fn resolveSym(m: *const Module, name: [*:0]const u8) ?*anyopaque {
     return @ptrFromInt(m.base + sym.st_value);
 }
 
-pub const ResolveError = error{
-    NoLibcBase,
-    SymbolNotFound,
-} || ModInitError;
-
-// Initialize and return Context with resolved dlopen/dlsym
-pub fn init(interp_base: usize) ResolveError!Context {
-    const base = findLibcBase() orelse blk: {
-        if (interp_base != 0) {
-            print("Falling back to the interpreter, for muslc the loader/libc are the same\n", .{});
-            break :blk interp_base;
-        }
-        return error.NoLibcBase;
-    };
-
+fn tryResolve(base: usize) ?Context {
     var m = Module{};
-    try modInit(&m, base);
+    modInit(&m, base) catch return null;
 
-    // Try glibc internal first, then fallback to dlopen
     const dlopen_ptr = resolveSym(&m, "__libc_dlopen_mode") orelse resolveSym(&m, "dlopen");
     const dlsym_ptr = resolveSym(&m, "dlsym");
-
-    if (dlopen_ptr == null or dlsym_ptr == null) {
-        return error.SymbolNotFound;
-    }
+    if (dlopen_ptr == null or dlsym_ptr == null) return null;
 
     return .{
         .dlopen_ptr = @ptrCast(dlopen_ptr.?),
         .dlsym_ptr = @ptrCast(dlsym_ptr.?),
     };
+}
+
+fn tryFromMaps() ?Context {
+    const fd = posix.openZ(MAPS_PATH, .{}, 0) catch return null;
+    defer posix.close(fd);
+
+    var iter = LibcBaseIterator{ .fd = fd };
+    while (iter.next()) |base| {
+        print("libc candidate 0x{x}\n", .{base});
+        if (tryResolve(base)) |ctx| return ctx;
+    }
+    return null;
+}
+
+pub const ResolveError = error{NoLibcBase};
+
+pub fn init(interp_base: usize) ResolveError!Context {
+    if (tryFromMaps()) |ctx| return ctx;
+
+    if (interp_base != 0) {
+        print("Falling back to the interpreter, for musl the loader/libc are the same\n", .{});
+        if (tryResolve(interp_base)) |ctx| return ctx;
+    }
+
+    return error.NoLibcBase;
 }
