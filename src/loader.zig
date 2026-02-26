@@ -265,8 +265,11 @@ pub fn Loader(
             linux.exit(1);
         }
 
-        comptime {
-            _ = Self.z_start;
+        pub fn exportSymbols() void {
+            @export(&z_start, .{ .name = "z_start" });
+            @export(&z_entry, .{ .name = "z_entry" });
+            @export(&z_fdl_entry, .{ .name = "z_fdl_entry" });
+            @export(&fdl_entry_impl, .{ .name = "fdl_entry_impl" });
         }
 
         var entry_sp: ?[*]usize = null;
@@ -275,7 +278,7 @@ pub fn Loader(
         /// Initial entry point (called from z_start via inline asm).
         /// Replicates the std.start initialization sequence: PIE
         /// relocations first, then TLS setup.
-        pub export fn z_entry(sp: [*]usize) callconv(.c) void {
+        fn z_entry(sp: [*]usize) callconv(.c) void {
             @setRuntimeSafety(false);
             @disableInstrumentation();
 
@@ -311,7 +314,7 @@ pub fn Loader(
         }
 
         /// Called after the dynamic loader finishes initialisation.
-        pub export fn fdl_entry_impl() callconv(.c) void {
+        fn fdl_entry_impl() callconv(.c) void {
             print("Loader is in memory... Start parsing logic\n", .{});
 
             var ctx = fdl_resolve.init(interp_base) catch {
@@ -323,7 +326,7 @@ pub fn Loader(
         }
 
         /// Naked trampoline that the hijacked AT_ENTRY points to.
-        pub export fn z_fdl_entry() callconv(.naked) noreturn {
+        fn z_fdl_entry() callconv(.naked) noreturn {
             asm volatile (
                 \\andq $-16, %%rsp
                 \\call *%[impl]
@@ -377,7 +380,7 @@ pub fn Loader(
         }
 
         /// Raw program entry point — passes the stack pointer to z_entry.
-        pub export fn z_start() callconv(.naked) noreturn {
+        fn z_start() callconv(.naked) noreturn {
             asm volatile (
                 \\mov %%rsp, %%rdi
                 \\call *%[entry]

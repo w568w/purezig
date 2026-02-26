@@ -74,7 +74,6 @@ fn addDemo(
             .link_libc = false,
             .imports = &.{.{ .name = "foreign_dlopen", .module = fdl_mod }},
         }),
-        .use_llvm = true,
     });
     foreign_dlopen.configureExe(exe);
     return exe;

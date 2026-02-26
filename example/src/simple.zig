@@ -25,3 +25,6 @@ fn fdlMain(ctx: *fdl.Context) void {
 const Impl = fdl.Entry(appMain, fdlMain);
 pub const _start = Impl._start;
 pub const panic = Impl.panic;
+comptime {
+    Impl.exportSymbols();
+}

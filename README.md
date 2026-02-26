@@ -74,10 +74,8 @@ pub fn build(b: *std.Build) void {
             // 2. Import the foreign_dlopen module
             .imports = &.{.{ .name = "foreign_dlopen", .module = fdl_mod }},
         }),
-        // 3. Self-hosted compiler has some bugs and builds broken executables atm, so we need to use llvm to build the final binary.
-        .use_llvm = true,
     });
-    // 4. Configure the executable with the helper function, which sets the entry point.
+    // 3. Configure the executable with the helper function, which sets the entry point.
     foreign_dlopen.configureExe(exe);
     b.installArtifact(exe);
 }
@@ -103,12 +101,16 @@ fn fdlMain(ctx: *fdl.Context) void {
     _ = puts("Hello from a static binary!");
 }
 
-// 1. Declare the entry points with fdl.Entry, which sets up the necessary boilerplate to jump into our code after the dynamic linker has initialized.
+// 5. Declare the entry points with fdl.Entry, which sets up the necessary boilerplate to jump into our code after the dynamic linker has initialized.
 const Impl = fdl.Entry(appMain, fdlMain);
-// 2. _start is required when .os_tag = .linux, although it is not actually used in our scenario.
+// 6. _start is required when .os_tag = .linux, although it is not actually used in our scenario.
 pub const _start = Impl._start;
-// 3. Declare the panic handler.
+// 7. Declare the panic handler.
 pub const panic = Impl.panic;
+// 8. Export the internal symbols required by the loader.
+comptime {
+    Impl.exportSymbols();
+}
 ```
 
 ### 3.2 Run the example
